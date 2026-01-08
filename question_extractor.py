@@ -42,7 +42,7 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     img_array = np.array(img)
 
     ocr = get_ocr()
-    result = ocr.ocr(img_array, cls=True)
+    result = ocr.ocr(img_array)
 
     if not result or not result[0]:
         return ""
