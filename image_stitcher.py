@@ -11,6 +11,18 @@ PADDING = 40  # 页边距
 GAP = 20  # 图片间距
 COLUMNS = 4  # 每行4列，每页只放1行
 
+# 手机截图裁切比例
+CROP_TOP_PERCENT = 5  # 裁切顶部7%（状态栏）
+CROP_BOTTOM_PERCENT = 3  # 裁切底部3%（底部横条）
+
+
+def crop_phone_screenshot(img: Image.Image) -> Image.Image:
+    """裁切手机截图的状态栏和底部横条"""
+    width, height = img.size
+    top = int(height * CROP_TOP_PERCENT / 100)
+    bottom = int(height * (100 - CROP_BOTTOM_PERCENT) / 100)
+    return img.crop((0, top, width, bottom))
+
 
 @dataclass
 class PlacedImage:
@@ -98,12 +110,13 @@ class ImageStitcher:
         return page
 
 
-def stitch_images_to_a4(image_bytes_list: list[bytes]) -> list[bytes]:
+def stitch_images_to_a4(image_bytes_list: list[bytes], crop: bool = True) -> list[bytes]:
     """
     便捷函数：将图片字节数据拼接成A4页面
 
     Args:
         image_bytes_list: 图片字节数据列表
+        crop: 是否裁切手机截图的状态栏和底部横条
 
     Returns:
         A4页面的PNG字节数据列表
@@ -116,6 +129,9 @@ def stitch_images_to_a4(image_bytes_list: list[bytes]) -> list[bytes]:
             background = Image.new('RGB', img.size, 'white')
             background.paste(img, mask=img.split()[3])
             img = background
+        # 裁切手机截图
+        if crop:
+            img = crop_phone_screenshot(img)
         images.append(img)
 
     stitcher = ImageStitcher()
@@ -130,12 +146,13 @@ def stitch_images_to_a4(image_bytes_list: list[bytes]) -> list[bytes]:
     return result
 
 
-def stitch_images_to_pdf(image_bytes_list: list[bytes]) -> bytes:
+def stitch_images_to_pdf(image_bytes_list: list[bytes], crop: bool = True) -> bytes:
     """
     将图片拼接成A4页面并生成PDF
 
     Args:
         image_bytes_list: 图片字节数据列表
+        crop: 是否裁切手机截图的状态栏和底部横条
 
     Returns:
         PDF文件字节数据
@@ -147,6 +164,9 @@ def stitch_images_to_pdf(image_bytes_list: list[bytes]) -> bytes:
             background = Image.new('RGB', img.size, 'white')
             background.paste(img, mask=img.split()[3])
             img = background
+        # 裁切手机截图
+        if crop:
+            img = crop_phone_screenshot(img)
         images.append(img)
 
     stitcher = ImageStitcher()
