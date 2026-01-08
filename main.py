@@ -5,7 +5,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from image_stitcher import stitch_images_to_a4, stitch_images_to_pdf
-from question_extractor import extract_questions_from_images
+from question_extractor import extract_questions_from_images, extract_text_from_image
 from exam_formatter import render_questions_to_pdf
 
 app = FastAPI(title="错题拼接打印服务")
@@ -108,6 +108,27 @@ async def generate_exam_pdf(files: list[UploadFile] = File(...)):
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=exam.pdf"}
     )
+
+
+@app.post("/api/ocr/debug")
+async def ocr_debug(files: list[UploadFile] = File(...)):
+    """
+    调试接口：只返回OCR识别的原始文字
+    """
+    if not files:
+        raise HTTPException(400, "请上传至少一张图片")
+
+    results = []
+    for i, file in enumerate(files):
+        content = await file.read()
+        validate_image(file.filename or "unknown", len(content))
+        try:
+            text = extract_text_from_image(content)
+            results.append({"index": i + 1, "filename": file.filename, "text": text})
+        except Exception as e:
+            results.append({"index": i + 1, "filename": file.filename, "error": str(e)})
+
+    return JSONResponse({"results": results})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -317,11 +338,16 @@ async def index():
         <div class="actions" id="actions" style="display:none;">
             <button class="btn btn-primary" id="submitBtn">生成PDF打印</button>
             <button class="btn btn-secondary" id="clearBtn">清空</button>
+            <button class="btn btn-secondary" id="debugBtn" style="display:none;">调试OCR</button>
         </div>
 
         <div class="status" id="status" style="display:none;"></div>
 
         <div class="result-area" id="resultArea"></div>
+        <div class="debug-area" id="debugArea" style="display:none;">
+            <h3>OCR识别结果：</h3>
+            <pre id="debugText" style="background:#f5f5f5;padding:15px;border-radius:8px;white-space:pre-wrap;word-break:break-all;font-size:14px;max-height:400px;overflow:auto;"></pre>
+        </div>
 
         <div class="tip" id="tipStitch">
             <strong>截图拼接模式：</strong><br>
@@ -340,8 +366,11 @@ async def index():
         const actions = document.getElementById('actions');
         const submitBtn = document.getElementById('submitBtn');
         const clearBtn = document.getElementById('clearBtn');
+        const debugBtn = document.getElementById('debugBtn');
         const status = document.getElementById('status');
         const resultArea = document.getElementById('resultArea');
+        const debugArea = document.getElementById('debugArea');
+        const debugText = document.getElementById('debugText');
         const tipStitch = document.getElementById('tipStitch');
         const tipExam = document.getElementById('tipExam');
         const modeBtns = document.querySelectorAll('.mode-btn');
@@ -358,6 +387,8 @@ async def index():
 
                 tipStitch.style.display = currentMode === 'stitch' ? 'block' : 'none';
                 tipExam.style.display = currentMode === 'exam' ? 'block' : 'none';
+                debugBtn.style.display = currentMode === 'exam' ? 'inline-block' : 'none';
+                debugArea.style.display = 'none';
             });
         });
 
@@ -445,6 +476,51 @@ async def index():
             status.style.display = 'none';
             resultArea.style.display = 'none';
             resultArea.innerHTML = '';
+            debugArea.style.display = 'none';
+        });
+
+        // 调试OCR按钮
+        debugBtn.addEventListener('click', async () => {
+            if (files.length === 0) return;
+
+            debugBtn.disabled = true;
+            status.className = 'status loading';
+            status.textContent = '正在识别...';
+            status.style.display = 'block';
+            debugArea.style.display = 'none';
+
+            const formData = new FormData();
+            files.forEach(file => formData.append('files', file));
+
+            try {
+                const response = await fetch('/api/ocr/debug', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || '识别失败');
+                }
+
+                const data = await response.json();
+                let output = '';
+                data.results.forEach(r => {
+                    output += `=== 图片 ${r.index}: ${r.filename} ===\\n`;
+                    output += r.error ? `错误: ${r.error}` : r.text;
+                    output += '\\n\\n';
+                });
+
+                debugText.textContent = output;
+                debugArea.style.display = 'block';
+                status.className = 'status success';
+                status.textContent = '识别完成，结果如下：';
+            } catch (err) {
+                status.className = 'status error';
+                status.textContent = '错误: ' + err.message;
+            } finally {
+                debugBtn.disabled = false;
+            }
         });
 
         submitBtn.addEventListener('click', async () => {
