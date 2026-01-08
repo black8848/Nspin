@@ -1,10 +1,12 @@
-"""题目识别与解析模块"""
+"""题目识别与解析模块 - 使用百度云OCR API"""
 
+import os
 import re
+import base64
+import requests
 from dataclasses import dataclass
 from io import BytesIO
 from PIL import Image
-from paddleocr import PaddleOCR
 
 
 @dataclass
@@ -15,20 +17,43 @@ class Question:
     raw_text: str  # 原始识别文本
 
 
-# 全局OCR实例（避免重复加载模型）
-_ocr_instance: PaddleOCR | None = None
+# 百度OCR配置
+BAIDU_API_KEY = os.getenv('BAIDU_OCR_API_KEY', '')
+BAIDU_SECRET_KEY = os.getenv('BAIDU_OCR_SECRET_KEY', '')
+
+# 缓存access_token
+_access_token: str | None = None
 
 
-def get_ocr() -> PaddleOCR:
-    """获取OCR实例（懒加载）"""
-    global _ocr_instance
-    if _ocr_instance is None:
-        _ocr_instance = PaddleOCR(use_angle_cls=True, lang='ch')
-    return _ocr_instance
+def _get_access_token() -> str:
+    """获取百度API access_token"""
+    global _access_token
+    if _access_token:
+        return _access_token
+
+    if not BAIDU_API_KEY or not BAIDU_SECRET_KEY:
+        raise ValueError("请设置环境变量 BAIDU_OCR_API_KEY 和 BAIDU_OCR_SECRET_KEY")
+
+    url = "https://aip.baidubce.com/oauth/2.0/token"
+    params = {
+        "grant_type": "client_credentials",
+        "client_id": BAIDU_API_KEY,
+        "client_secret": BAIDU_SECRET_KEY
+    }
+
+    response = requests.post(url, params=params, timeout=10)
+    result = response.json()
+
+    if "access_token" not in result:
+        raise ValueError(f"获取access_token失败: {result}")
+
+    _access_token = result["access_token"]
+    return _access_token
 
 
 def extract_text_from_image(image_bytes: bytes) -> str:
-    """从图片中提取文字"""
+    """使用百度OCR从图片中提取文字"""
+    # 预处理图片
     img = Image.open(BytesIO(image_bytes))
     if img.mode == 'RGBA':
         background = Image.new('RGB', img.size, 'white')
@@ -37,25 +62,29 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     elif img.mode != 'RGB':
         img = img.convert('RGB')
 
-    # 保存为临时数组供OCR使用
-    import numpy as np
-    img_array = np.array(img)
+    # 转为base64
+    buffer = BytesIO()
+    img.save(buffer, format='JPEG', quality=90)
+    img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-    ocr = get_ocr()
-    result = ocr.ocr(img_array)
+    # 调用百度OCR API（通用文字识别-高精度版）
+    access_token = _get_access_token()
+    url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token={access_token}"
 
-    if not result or not result[0]:
-        return ""
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {"image": img_base64}
 
-    # 按y坐标排序，然后拼接文本
-    lines = []
-    for line in result[0]:
-        box, (text, confidence) = line
-        y_center = (box[0][1] + box[2][1]) / 2
-        lines.append((y_center, text))
+    response = requests.post(url, headers=headers, data=data, timeout=30)
+    result = response.json()
 
-    lines.sort(key=lambda x: x[0])
-    return '\n'.join(text for _, text in lines)
+    if "error_code" in result:
+        raise ValueError(f"OCR识别失败: {result.get('error_msg', 'Unknown error')}")
+
+    # 提取文字
+    words_result = result.get("words_result", [])
+    lines = [item["words"] for item in words_result]
+
+    return '\n'.join(lines)
 
 
 def parse_question(text: str) -> Question:
@@ -93,15 +122,11 @@ def parse_question(text: str) -> Question:
             key, value = match.groups()
             options[key] = value.strip()
         elif in_options and len(line) <= 20:
-            # 可能是选项的延续或独立的选项标识
             # 检查是否是纯选项标识如 "A 触摸 投影 气韵"
             multi_match = re.match(r'^([A-D])\s+(.+)$', line)
             if multi_match:
                 key, value = multi_match.groups()
                 options[key] = value.strip()
-            else:
-                # 可能是上一个选项的延续
-                pass
         else:
             if not in_options:
                 stem_lines.append(line)
@@ -110,17 +135,15 @@ def parse_question(text: str) -> Question:
     if not options:
         options = _try_parse_inline_options(filtered_lines)
         if options:
-            # 重新提取题干（去掉选项部分）
             stem_lines = []
             for line in filtered_lines:
-                if not any(re.match(r'^[A-D][\s\.．、]', line) for _ in [1]):
-                    has_option = False
-                    for opt in ['A', 'B', 'C', 'D']:
-                        if line.strip().startswith(opt + ' ') or line.strip().startswith(opt + '　'):
-                            has_option = True
-                            break
-                    if not has_option:
-                        stem_lines.append(line)
+                has_option = False
+                for opt in ['A', 'B', 'C', 'D']:
+                    if line.strip().startswith(opt + ' ') or line.strip().startswith(opt + '　'):
+                        has_option = True
+                        break
+                if not has_option:
+                    stem_lines.append(line)
 
     stem = ''.join(stem_lines)
 
@@ -139,7 +162,6 @@ def _try_parse_inline_options(lines: list[str]) -> dict[str, str]:
     """尝试解析内联格式的选项，如 'A 触摸 投影 气韵'"""
     options = {}
     for line in lines:
-        # 匹配 "A 内容" 格式
         match = re.match(r'^([A-D])\s+(.+)$', line.strip())
         if match:
             key, value = match.groups()
