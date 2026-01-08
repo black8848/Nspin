@@ -67,19 +67,24 @@ class ImageStitcher:
         return [self._render_page(page) for page in pages]
 
     def _layout_images(self, images: list[Image.Image]) -> list[list[PlacedImage]]:
-        """4列布局，每页只放4张图片"""
+        """4列布局，每页只放4张图片，垂直居中"""
         pages: list[list[PlacedImage]] = []
 
         for i in range(0, len(images), COLUMNS):
             row_images = images[i:i + COLUMNS]
             current_page: list[PlacedImage] = []
 
+            # 计算这一行图片的最大高度，用于垂直居中
+            max_height = max(im.height for im in row_images)
+            # 垂直居中：(页面高度 - 图片高度) / 2
+            y_offset = (self.a4_height - max_height) // 2
+
             for col, im in enumerate(row_images):
                 x = PADDING + col * (self.cell_width + GAP)
                 current_page.append(PlacedImage(
                     image=im,
                     x=x,
-                    y=PADDING,
+                    y=y_offset,
                     width=im.width,
                     height=im.height
                 ))
