@@ -5,6 +5,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from image_stitcher import stitch_images_to_a4, stitch_images_to_pdf
+from question_extractor import extract_questions_from_images
+from exam_formatter import render_questions_to_pdf
 
 app = FastAPI(title="错题拼接打印服务")
 
@@ -77,6 +79,37 @@ async def stitch_images_pdf(files: list[UploadFile] = File(...)):
     )
 
 
+@app.post("/api/exam/pdf")
+async def generate_exam_pdf(files: list[UploadFile] = File(...)):
+    """
+    OCR识别图片中的题目，生成试卷样式PDF
+    """
+    if not files:
+        raise HTTPException(400, "请上传至少一张图片")
+
+    image_bytes_list = []
+    for file in files:
+        content = await file.read()
+        validate_image(file.filename or "unknown", len(content))
+        image_bytes_list.append(content)
+
+    try:
+        questions = extract_questions_from_images(image_bytes_list)
+        if not questions:
+            raise HTTPException(400, "未能识别到任何题目")
+        pdf_data = render_questions_to_pdf(questions)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"处理失败: {str(e)}")
+
+    return Response(
+        content=pdf_data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=exam.pdf"}
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """返回前端页面"""
@@ -101,7 +134,31 @@ async def index():
         h1 {
             text-align: center;
             color: #333;
-            margin-bottom: 30px;
+            margin-bottom: 20px;
+        }
+        .mode-toggle {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+            background: white;
+            border-radius: 8px;
+            padding: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .mode-btn {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            border-radius: 6px;
+            transition: all 0.3s;
+            color: #666;
+        }
+        .mode-btn.active {
+            background: #007bff;
+            color: white;
         }
         .upload-area {
             background: white;
@@ -243,6 +300,11 @@ async def index():
     <div class="container">
         <h1>错题拼接打印</h1>
 
+        <div class="mode-toggle">
+            <button class="mode-btn active" data-mode="stitch">截图拼接</button>
+            <button class="mode-btn" data-mode="exam">试卷模式</button>
+        </div>
+
         <div class="upload-area" id="uploadArea">
             <div class="upload-icon">📷</div>
             <div class="upload-text">点击或拖拽上传错题截图</div>
@@ -261,11 +323,13 @@ async def index():
 
         <div class="result-area" id="resultArea"></div>
 
-        <div class="tip">
-            <strong>使用说明：</strong><br>
-            1. 上传多张错题截图（可拖拽排序）<br>
-            2. 点击"生成PDF打印"<br>
-            3. 下载PDF文件，直接打印即可
+        <div class="tip" id="tipStitch">
+            <strong>截图拼接模式：</strong><br>
+            将多张截图按原样拼接成A4横向PDF，每页4张图片
+        </div>
+        <div class="tip" id="tipExam" style="display:none;">
+            <strong>试卷模式：</strong><br>
+            OCR识别截图中的题目，按试卷样式重新排版（题干+选项）
         </div>
     </div>
 
@@ -278,8 +342,24 @@ async def index():
         const clearBtn = document.getElementById('clearBtn');
         const status = document.getElementById('status');
         const resultArea = document.getElementById('resultArea');
+        const tipStitch = document.getElementById('tipStitch');
+        const tipExam = document.getElementById('tipExam');
+        const modeBtns = document.querySelectorAll('.mode-btn');
 
         let files = [];
+        let currentMode = 'stitch';
+
+        // 模式切换
+        modeBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                modeBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentMode = btn.dataset.mode;
+
+                tipStitch.style.display = currentMode === 'stitch' ? 'block' : 'none';
+                tipExam.style.display = currentMode === 'exam' ? 'block' : 'none';
+            });
+        });
 
         uploadArea.addEventListener('click', () => fileInput.click());
         uploadArea.addEventListener('dragover', (e) => {
@@ -371,8 +451,11 @@ async def index():
             if (files.length === 0) return;
 
             submitBtn.disabled = true;
+            const apiUrl = currentMode === 'exam' ? '/api/exam/pdf' : '/api/stitch/pdf';
+            const loadingText = currentMode === 'exam' ? '正在识别并生成试卷...' : '正在生成PDF...';
+
             status.className = 'status loading';
-            status.textContent = '正在生成PDF...';
+            status.textContent = loadingText;
             status.style.display = 'block';
             resultArea.style.display = 'none';
             resultArea.innerHTML = '';
@@ -381,7 +464,7 @@ async def index():
             files.forEach(file => formData.append('files', file));
 
             try {
-                const response = await fetch('/api/stitch/pdf', {
+                const response = await fetch(apiUrl, {
                     method: 'POST',
                     body: formData
                 });
@@ -395,7 +478,7 @@ async def index():
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'output.pdf';
+                a.download = currentMode === 'exam' ? 'exam.pdf' : 'output.pdf';
                 a.click();
                 URL.revokeObjectURL(url);
 
