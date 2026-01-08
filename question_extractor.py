@@ -91,64 +91,89 @@ def parse_question(text: str) -> Question:
     """解析题目文本，提取题干和选项"""
     lines = text.strip().split('\n')
 
-    # 过滤掉一些无关内容（如页码、标签等）
+    # 过滤掉无关内容（状态栏、页码、标签等）
     filtered_lines = []
     skip_patterns = [
-        r'^\d+/\d+$',  # 页码如 1/18
+        r'^\d+/\d+$',  # 页码如 6/19
         r'^单选题$',
         r'^多选题$',
+        r'^常识判断$',
         r'^逻辑填空$',
-        r'^\d{1,2}:\d{2}',  # 时间
+        r'^言语理解$',
+        r'^资料分析$',
+        r'^判断推理$',
+        r'^数量关系$',
+        r'^\d{1,2}:\d{2}',  # 时间如 9:17
+        r'^5G',  # 信号
+        r'^\d+$',  # 纯数字
+        r'^\.{2,}',  # 省略号开头
+        r'^\\\s*$',  # 反斜杠
     ]
     for line in lines:
         line = line.strip()
-        if not line:
+        if not line or len(line) <= 2:
             continue
         if any(re.match(p, line) for p in skip_patterns):
             continue
         filtered_lines.append(line)
 
-    # 查找选项的位置
-    option_pattern = r'^([A-D])[\.．、\s](.+)$'
+    # 合并选项：处理 "A" 和 "选项内容" 分行的情况
+    merged_lines = []
+    i = 0
+    while i < len(filtered_lines):
+        line = filtered_lines[i]
+        # 如果当前行只是一个选项字母
+        if re.match(r'^[A-D]$', line) and i + 1 < len(filtered_lines):
+            next_line = filtered_lines[i + 1]
+            # 下一行不是选项字母，则合并
+            if not re.match(r'^[A-D]$', next_line):
+                merged_lines.append(f"{line} {next_line}")
+                i += 2
+                continue
+        merged_lines.append(line)
+        i += 1
+
+    # 再次合并：处理选项内容跨多行的情况（如 "与能力" 是上一行的延续）
+    final_lines = []
+    current_option = None
+    for line in merged_lines:
+        # 检查是否是新选项开头
+        match = re.match(r'^([A-D])[\s\.．、](.*)$', line)
+        if match:
+            if current_option:
+                final_lines.append(current_option)
+            current_option = line
+        elif current_option and not re.match(r'^[A-D][\s\.．、]', line):
+            # 可能是选项内容的延续（不以选项字母开头的短行）
+            if len(line) < 30 and not line.endswith('。'):
+                current_option += line
+            else:
+                final_lines.append(current_option)
+                current_option = None
+                final_lines.append(line)
+        else:
+            if current_option:
+                final_lines.append(current_option)
+                current_option = None
+            final_lines.append(line)
+    if current_option:
+        final_lines.append(current_option)
+
+    # 提取题干和选项
     options = {}
     stem_lines = []
-    in_options = False
 
-    for line in filtered_lines:
-        # 检查是否是选项行
-        match = re.match(option_pattern, line)
+    for line in final_lines:
+        match = re.match(r'^([A-D])[\s\.．、](.+)$', line)
         if match:
-            in_options = True
             key, value = match.groups()
             options[key] = value.strip()
-        elif in_options and len(line) <= 20:
-            # 检查是否是纯选项标识如 "A 触摸 投影 气韵"
-            multi_match = re.match(r'^([A-D])\s+(.+)$', line)
-            if multi_match:
-                key, value = multi_match.groups()
-                options[key] = value.strip()
-        else:
-            if not in_options:
-                stem_lines.append(line)
-
-    # 如果没有找到标准格式的选项，尝试另一种解析方式
-    if not options:
-        options = _try_parse_inline_options(filtered_lines)
-        if options:
-            stem_lines = []
-            for line in filtered_lines:
-                has_option = False
-                for opt in ['A', 'B', 'C', 'D']:
-                    if line.strip().startswith(opt + ' ') or line.strip().startswith(opt + '　'):
-                        has_option = True
-                        break
-                if not has_option:
-                    stem_lines.append(line)
+        elif not options:  # 还没遇到选项，都算题干
+            stem_lines.append(line)
 
     stem = ''.join(stem_lines)
 
-    # 清理题干中可能的问题标记
-    stem = re.sub(r'依次填入横线处最恰当的是[（\(]\s*[）\)]。?', '', stem)
+    # 清理题干
     stem = re.sub(r'[（\(]\s*[）\)]\s*。?$', '', stem)
 
     return Question(
