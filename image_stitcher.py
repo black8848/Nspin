@@ -128,3 +128,39 @@ def stitch_images_to_a4(image_bytes_list: list[bytes]) -> list[bytes]:
         result.append(buffer.getvalue())
 
     return result
+
+
+def stitch_images_to_pdf(image_bytes_list: list[bytes]) -> bytes:
+    """
+    将图片拼接成A4页面并生成PDF
+
+    Args:
+        image_bytes_list: 图片字节数据列表
+
+    Returns:
+        PDF文件字节数据
+    """
+    images = []
+    for data in image_bytes_list:
+        img = Image.open(BytesIO(data))
+        if img.mode == 'RGBA':
+            background = Image.new('RGB', img.size, 'white')
+            background.paste(img, mask=img.split()[3])
+            img = background
+        images.append(img)
+
+    stitcher = ImageStitcher()
+    pages = stitcher.stitch(images)
+
+    if not pages:
+        raise ValueError("没有生成任何页面")
+
+    buffer = BytesIO()
+    pages[0].save(
+        buffer,
+        format='PDF',
+        save_all=True,
+        append_images=pages[1:] if len(pages) > 1 else [],
+        resolution=300
+    )
+    return buffer.getvalue()
