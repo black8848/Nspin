@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from PIL import Image
 from io import BytesIO
 
-# A4 尺寸 (300 DPI)
-A4_WIDTH = 2480
-A4_HEIGHT = 3508
+# A4 尺寸 (300 DPI) - 横向
+A4_WIDTH = 3508
+A4_HEIGHT = 2480
 PADDING = 40  # 页边距
 GAP = 20  # 图片间距
-COLUMNS = 4  # 每行4列
+COLUMNS = 4  # 每行4列，每页只放1行
 
 
 @dataclass
@@ -55,58 +55,23 @@ class ImageStitcher:
         return [self._render_page(page) for page in pages]
 
     def _layout_images(self, images: list[Image.Image]) -> list[list[PlacedImage]]:
-        """4列网格布局"""
+        """4列布局，每页只放4张图片"""
         pages: list[list[PlacedImage]] = []
-        current_page: list[PlacedImage] = []
-        current_y = 0
-        row_images: list[Image.Image] = []
 
-        for img in images:
-            row_images.append(img)
-
-            if len(row_images) == COLUMNS:
-                row_height = max(im.height for im in row_images)
-
-                # 检查是否需要新页面
-                if current_y + row_height > self.content_height and current_page:
-                    pages.append(current_page)
-                    current_page = []
-                    current_y = 0
-
-                # 放置这一行
-                for col, im in enumerate(row_images):
-                    x = PADDING + col * (self.cell_width + GAP)
-                    current_page.append(PlacedImage(
-                        image=im,
-                        x=x,
-                        y=PADDING + current_y,
-                        width=im.width,
-                        height=im.height
-                    ))
-
-                current_y += row_height + GAP
-                row_images = []
-
-        # 处理剩余不足4张的图片
-        if row_images:
-            row_height = max(im.height for im in row_images)
-
-            if current_y + row_height > self.content_height and current_page:
-                pages.append(current_page)
-                current_page = []
-                current_y = 0
+        for i in range(0, len(images), COLUMNS):
+            row_images = images[i:i + COLUMNS]
+            current_page: list[PlacedImage] = []
 
             for col, im in enumerate(row_images):
                 x = PADDING + col * (self.cell_width + GAP)
                 current_page.append(PlacedImage(
                     image=im,
                     x=x,
-                    y=PADDING + current_y,
+                    y=PADDING,
                     width=im.width,
                     height=im.height
                 ))
 
-        if current_page:
             pages.append(current_page)
 
         return pages
