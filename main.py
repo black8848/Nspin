@@ -1,10 +1,8 @@
 """错题拼接打印服务"""
 
-import zipfile
-from io import BytesIO
+import base64
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from image_stitcher import stitch_images_to_a4
 
@@ -29,8 +27,7 @@ async def stitch_images(files: list[UploadFile] = File(...)):
     上传多张图片，拼接成A4页面
 
     Returns:
-        - 单页: 直接返回PNG图片
-        - 多页: 返回ZIP压缩包
+        JSON包含base64编码的图片列表
     """
     if not files:
         raise HTTPException(400, "请上传至少一张图片")
@@ -49,24 +46,9 @@ async def stitch_images(files: list[UploadFile] = File(...)):
     if not pages:
         raise HTTPException(500, "生成页面失败")
 
-    if len(pages) == 1:
-        return Response(
-            content=pages[0],
-            media_type="image/png",
-            headers={"Content-Disposition": "attachment; filename=output.png"}
-        )
-
-    # 多页打包为ZIP
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for i, page_data in enumerate(pages, 1):
-            zf.writestr(f"page_{i}.png", page_data)
-
-    return Response(
-        content=zip_buffer.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=output.zip"}
-    )
+    # 返回base64编码的图片列表
+    images_base64 = [base64.b64encode(page).decode('utf-8') for page in pages]
+    return JSONResponse({"pages": images_base64})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -202,6 +184,33 @@ async def index():
             color: #0c5460;
             font-size: 14px;
         }
+        .result-area {
+            margin-top: 20px;
+            display: none;
+        }
+        .result-item {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .result-item h3 {
+            margin-bottom: 10px;
+            color: #333;
+            font-size: 16px;
+        }
+        .result-item img {
+            width: 100%;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+        .result-item .save-tip {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -224,11 +233,13 @@ async def index():
 
         <div class="status" id="status" style="display:none;"></div>
 
+        <div class="result-area" id="resultArea"></div>
+
         <div class="tip">
             <strong>使用说明：</strong><br>
             1. 上传多张错题截图（可拖拽排序）<br>
             2. 点击"生成A4打印图"<br>
-            3. 下载生成的图片，直接打印即可
+            3. 长按图片保存，直接打印即可
         </div>
     </div>
 
@@ -240,6 +251,7 @@ async def index():
         const submitBtn = document.getElementById('submitBtn');
         const clearBtn = document.getElementById('clearBtn');
         const status = document.getElementById('status');
+        const resultArea = document.getElementById('resultArea');
 
         let files = [];
 
@@ -325,6 +337,8 @@ async def index():
             files = [];
             renderPreviews();
             status.style.display = 'none';
+            resultArea.style.display = 'none';
+            resultArea.innerHTML = '';
         });
 
         submitBtn.addEventListener('click', async () => {
@@ -334,6 +348,8 @@ async def index():
             status.className = 'status loading';
             status.textContent = '正在处理...';
             status.style.display = 'block';
+            resultArea.style.display = 'none';
+            resultArea.innerHTML = '';
 
             const formData = new FormData();
             files.forEach(file => formData.append('files', file));
@@ -349,17 +365,23 @@ async def index():
                     throw new Error(err.detail || '处理失败');
                 }
 
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = response.headers.get('Content-Type').includes('zip')
-                    ? 'output.zip' : 'output.png';
-                a.click();
-                URL.revokeObjectURL(url);
+                const data = await response.json();
 
                 status.className = 'status success';
-                status.textContent = '生成成功！文件已开始下载';
+                status.textContent = `生成成功！共 ${data.pages.length} 页，长按图片保存`;
+
+                resultArea.innerHTML = '';
+                data.pages.forEach((base64, index) => {
+                    const div = document.createElement('div');
+                    div.className = 'result-item';
+                    div.innerHTML = `
+                        <h3>第 ${index + 1} 页</h3>
+                        <img src="data:image/png;base64,${base64}" alt="第${index + 1}页">
+                        <div class="save-tip">长按图片保存到相册</div>
+                    `;
+                    resultArea.appendChild(div);
+                });
+                resultArea.style.display = 'block';
             } catch (err) {
                 status.className = 'status error';
                 status.textContent = '错误: ' + err.message;
