@@ -117,61 +117,68 @@ def parse_question(text: str) -> Question:
             continue
         filtered_lines.append(line)
 
-    # 合并选项：处理 "A" 和 "选项内容" 分行的情况
-    merged_lines = []
-    i = 0
-    while i < len(filtered_lines):
+    # 找出所有选项字母的位置
+    option_positions = []  # [(index, letter), ...]
+    for i, line in enumerate(filtered_lines):
+        if re.match(r'^[A-D]$', line):
+            option_positions.append((i, line))
+
+    # 如果没有找到独立的选项字母，尝试其他格式
+    if not option_positions:
+        return _parse_inline_format(filtered_lines, text)
+
+    # 找到第一个选项字母之前的内容作为题干
+    first_option_idx = option_positions[0][0]
+
+    # 题干可能在第一个选项内容之前，需要找到题干的结束位置
+    # 通常题干以 () 或 （）结尾
+    stem_end_idx = first_option_idx
+    for i in range(first_option_idx):
         line = filtered_lines[i]
-        # 如果当前行只是一个选项字母
-        if re.match(r'^[A-D]$', line) and i + 1 < len(filtered_lines):
-            next_line = filtered_lines[i + 1]
-            # 下一行不是选项字母，则合并
-            if not re.match(r'^[A-D]$', next_line):
-                merged_lines.append(f"{line} {next_line}")
-                i += 2
-                continue
-        merged_lines.append(line)
-        i += 1
+        if '()' in line or '（）' in line or line.endswith('。'):
+            stem_end_idx = i + 1
+            break
 
-    # 再次合并：处理选项内容跨多行的情况（如 "与能力" 是上一行的延续）
-    final_lines = []
-    current_option = None
-    for line in merged_lines:
-        # 检查是否是新选项开头
-        match = re.match(r'^([A-D])[\s\.．、](.*)$', line)
-        if match:
-            if current_option:
-                final_lines.append(current_option)
-            current_option = line
-        elif current_option and not re.match(r'^[A-D][\s\.．、]', line):
-            # 可能是选项内容的延续（不以选项字母开头的短行）
-            if len(line) < 30 and not line.endswith('。'):
-                current_option += line
-            else:
-                final_lines.append(current_option)
-                current_option = None
-                final_lines.append(line)
-        else:
-            if current_option:
-                final_lines.append(current_option)
-                current_option = None
-            final_lines.append(line)
-    if current_option:
-        final_lines.append(current_option)
-
-    # 提取题干和选项
-    options = {}
-    stem_lines = []
-
-    for line in final_lines:
-        match = re.match(r'^([A-D])[\s\.．、](.+)$', line)
-        if match:
-            key, value = match.groups()
-            options[key] = value.strip()
-        elif not options:  # 还没遇到选项，都算题干
-            stem_lines.append(line)
-
+    stem_lines = filtered_lines[:stem_end_idx]
     stem = ''.join(stem_lines)
+
+    # 提取选项内容
+    # 选项内容 = 字母前的内容（从上一个选项结束到当前字母）+ 字母后的内容（到下一个选项开始）
+    options = {}
+
+    for idx, (pos, letter) in enumerate(option_positions):
+        # 找到这个选项的内容范围
+        # 前面的内容：从题干结束/上一个选项字母+1 到 当前字母位置
+        if idx == 0:
+            start_before = stem_end_idx
+        else:
+            start_before = option_positions[idx - 1][0] + 1
+
+        content_before = filtered_lines[start_before:pos]
+
+        # 后面的内容：从当前字母+1 到 下一个选项的"前内容"开始
+        # 这比较复杂，简化处理：后面直到下一个选项字母或结束
+        if idx + 1 < len(option_positions):
+            end_after = option_positions[idx + 1][0]
+        else:
+            end_after = len(filtered_lines)
+
+        content_after = filtered_lines[pos + 1:end_after]
+
+        # 合并内容
+        # 但要注意：content_after 可能包含下一个选项的"前内容"
+        # 对于 A 后面的内容，只取到遇到看起来像新选项开始的地方
+        final_content_after = []
+        for line in content_after:
+            # 如果这行看起来像是新选项的开始（较长的内容行），可能属于下一个选项
+            # 简单处理：只取紧跟着选项字母的短行
+            if len(final_content_after) == 0 or len(line) < 20:
+                final_content_after.append(line)
+            else:
+                break
+
+        all_content = content_before + final_content_after
+        options[letter] = ''.join(all_content)
 
     # 清理题干
     stem = re.sub(r'[（\(]\s*[）\)]\s*。?$', '', stem)
@@ -181,6 +188,25 @@ def parse_question(text: str) -> Question:
         options=options,
         raw_text=text
     )
+
+
+def _parse_inline_format(lines: list[str], raw_text: str) -> Question:
+    """解析选项字母和内容在同一行的格式"""
+    options = {}
+    stem_lines = []
+
+    for line in lines:
+        match = re.match(r'^([A-D])[\s\.．、](.+)$', line)
+        if match:
+            key, value = match.groups()
+            options[key] = value.strip()
+        elif not options:
+            stem_lines.append(line)
+
+    stem = ''.join(stem_lines)
+    stem = re.sub(r'[（\(]\s*[）\)]\s*。?$', '', stem)
+
+    return Question(stem=stem.strip(), options=options, raw_text=raw_text)
 
 
 def _try_parse_inline_options(lines: list[str]) -> dict[str, str]:
