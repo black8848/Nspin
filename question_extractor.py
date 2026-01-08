@@ -217,10 +217,37 @@ def parse_question_with_location(words_result: list[dict]) -> Question:
         if closest_letter:
             options[closest_letter].append(item)
 
-    # 按Y坐标排序后合并每个选项的内容
+    # 按行分组，组内按X排序，然后合并
     for letter in options:
-        options[letter].sort(key=lambda x: x["top"])
-        options[letter] = ''.join(item["text"] for item in options[letter])
+        content_list = options[letter]
+        if not content_list:
+            options[letter] = ""
+            continue
+
+        # 先按Y排序
+        content_list.sort(key=lambda x: x["top"])
+
+        # 按Y坐标分组（Y差距<40的归为同一行）
+        lines = []
+        current_line = [content_list[0]]
+        for item in content_list[1:]:
+            if abs(item["top"] - current_line[0]["top"]) < 40:
+                current_line.append(item)
+            else:
+                lines.append(current_line)
+                current_line = [item]
+        lines.append(current_line)
+
+        # 每行内按X坐标排序
+        for line in lines:
+            line.sort(key=lambda x: x["left"])
+
+        # 合并：行内用空格，行间直接拼接
+        result_parts = []
+        for line in lines:
+            line_text = ' '.join(item["text"] for item in line)
+            result_parts.append(line_text)
+        options[letter] = ''.join(result_parts)
 
     return Question(stem=stem.strip(), options=options, raw_text=raw_text)
 
