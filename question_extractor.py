@@ -67,9 +67,9 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     img.save(buffer, format='JPEG', quality=90)
     img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-    # 调用百度OCR API（通用文字识别-标准版）
+    # 调用百度OCR API（通用文字识别-高精度版）
     access_token = _get_access_token()
-    url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token={access_token}"
+    url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token={access_token}"
 
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {"image": img_base64}
