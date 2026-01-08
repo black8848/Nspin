@@ -23,7 +23,7 @@ def get_ocr() -> PaddleOCR:
     """获取OCR实例（懒加载）"""
     global _ocr_instance
     if _ocr_instance is None:
-        _ocr_instance = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
+        _ocr_instance = PaddleOCR(use_angle_cls=True, lang='ch')
     return _ocr_instance
 
 
