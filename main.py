@@ -1,0 +1,377 @@
+"""错题拼接打印服务"""
+
+import zipfile
+from io import BytesIO
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from image_stitcher import stitch_images_to_a4
+
+app = FastAPI(title="错题拼接打印服务")
+
+ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
+
+
+def validate_image(filename: str, size: int) -> None:
+    """验证上传的图片"""
+    ext = '.' + filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"不支持的文件格式: {ext}")
+    if size > MAX_FILE_SIZE:
+        raise HTTPException(400, f"文件过大: {filename}")
+
+
+@app.post("/api/stitch")
+async def stitch_images(files: list[UploadFile] = File(...)):
+    """
+    上传多张图片，拼接成A4页面
+
+    Returns:
+        - 单页: 直接返回PNG图片
+        - 多页: 返回ZIP压缩包
+    """
+    if not files:
+        raise HTTPException(400, "请上传至少一张图片")
+
+    image_bytes_list = []
+    for file in files:
+        content = await file.read()
+        validate_image(file.filename or "unknown", len(content))
+        image_bytes_list.append(content)
+
+    try:
+        pages = stitch_images_to_a4(image_bytes_list)
+    except Exception as e:
+        raise HTTPException(500, f"图片处理失败: {str(e)}")
+
+    if not pages:
+        raise HTTPException(500, "生成页面失败")
+
+    if len(pages) == 1:
+        return Response(
+            content=pages[0],
+            media_type="image/png",
+            headers={"Content-Disposition": "attachment; filename=output.png"}
+        )
+
+    # 多页打包为ZIP
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for i, page_data in enumerate(pages, 1):
+            zf.writestr(f"page_{i}.png", page_data)
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=output.zip"}
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    """返回前端页面"""
+    return """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>错题拼接打印</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .upload-area {
+            background: white;
+            border: 2px dashed #ccc;
+            border-radius: 12px;
+            padding: 60px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover, .upload-area.dragover {
+            border-color: #007bff;
+            background: #f8f9ff;
+        }
+        .upload-area input { display: none; }
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+        .upload-text { color: #666; font-size: 16px; }
+        .preview-area {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .preview-item {
+            position: relative;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .preview-item img {
+            width: 100%;
+            height: 120px;
+            object-fit: cover;
+        }
+        .preview-item .remove {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 24px;
+            height: 24px;
+            background: rgba(255,0,0,0.8);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 24px;
+        }
+        .preview-item .order {
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            width: 24px;
+            height: 24px;
+            background: rgba(0,123,255,0.9);
+            color: white;
+            border-radius: 50%;
+            font-size: 12px;
+            line-height: 24px;
+            text-align: center;
+        }
+        .actions {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .btn {
+            padding: 12px 40px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+            margin-left: 10px;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .status.loading { background: #fff3cd; color: #856404; }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .tip {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e7f3ff;
+            border-radius: 8px;
+            color: #0c5460;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>错题拼接打印</h1>
+
+        <div class="upload-area" id="uploadArea">
+            <div class="upload-icon">📷</div>
+            <div class="upload-text">点击或拖拽上传错题截图</div>
+            <div class="upload-text" style="font-size:12px;color:#999;margin-top:8px;">支持 PNG、JPG、WEBP 格式，可多选</div>
+            <input type="file" id="fileInput" multiple accept="image/*">
+        </div>
+
+        <div class="preview-area" id="previewArea"></div>
+
+        <div class="actions" id="actions" style="display:none;">
+            <button class="btn btn-primary" id="submitBtn">生成A4打印图</button>
+            <button class="btn btn-secondary" id="clearBtn">清空</button>
+        </div>
+
+        <div class="status" id="status" style="display:none;"></div>
+
+        <div class="tip">
+            <strong>使用说明：</strong><br>
+            1. 上传多张错题截图（可拖拽排序）<br>
+            2. 点击"生成A4打印图"<br>
+            3. 下载生成的图片，直接打印即可
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const previewArea = document.getElementById('previewArea');
+        const actions = document.getElementById('actions');
+        const submitBtn = document.getElementById('submitBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const status = document.getElementById('status');
+
+        let files = [];
+
+        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            addFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', () => {
+            addFiles(fileInput.files);
+            fileInput.value = '';
+        });
+
+        function addFiles(newFiles) {
+            for (const file of newFiles) {
+                if (file.type.startsWith('image/')) {
+                    files.push(file);
+                }
+            }
+            renderPreviews();
+        }
+
+        function renderPreviews() {
+            previewArea.innerHTML = '';
+            files.forEach((file, index) => {
+                const div = document.createElement('div');
+                div.className = 'preview-item';
+                div.draggable = true;
+                div.dataset.index = index;
+
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(file);
+
+                const order = document.createElement('span');
+                order.className = 'order';
+                order.textContent = index + 1;
+
+                const remove = document.createElement('button');
+                remove.className = 'remove';
+                remove.textContent = '×';
+                remove.onclick = () => {
+                    files.splice(index, 1);
+                    renderPreviews();
+                };
+
+                div.appendChild(img);
+                div.appendChild(order);
+                div.appendChild(remove);
+
+                // 拖拽排序
+                div.addEventListener('dragstart', (e) => {
+                    e.dataTransfer.setData('text/plain', index);
+                    div.style.opacity = '0.5';
+                });
+                div.addEventListener('dragend', () => div.style.opacity = '1');
+                div.addEventListener('dragover', (e) => e.preventDefault());
+                div.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
+                    const toIndex = index;
+                    if (fromIndex !== toIndex) {
+                        const [moved] = files.splice(fromIndex, 1);
+                        files.splice(toIndex, 0, moved);
+                        renderPreviews();
+                    }
+                });
+
+                previewArea.appendChild(div);
+            });
+
+            actions.style.display = files.length > 0 ? 'block' : 'none';
+        }
+
+        clearBtn.addEventListener('click', () => {
+            files = [];
+            renderPreviews();
+            status.style.display = 'none';
+        });
+
+        submitBtn.addEventListener('click', async () => {
+            if (files.length === 0) return;
+
+            submitBtn.disabled = true;
+            status.className = 'status loading';
+            status.textContent = '正在处理...';
+            status.style.display = 'block';
+
+            const formData = new FormData();
+            files.forEach(file => formData.append('files', file));
+
+            try {
+                const response = await fetch('/api/stitch', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || '处理失败');
+                }
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = response.headers.get('Content-Type').includes('zip')
+                    ? 'output.zip' : 'output.png';
+                a.click();
+                URL.revokeObjectURL(url);
+
+                status.className = 'status success';
+                status.textContent = '生成成功！文件已开始下载';
+            } catch (err) {
+                status.className = 'status error';
+                status.textContent = '错误: ' + err.message;
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
