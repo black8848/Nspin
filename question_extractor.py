@@ -51,8 +51,8 @@ def _get_access_token() -> str:
     return _access_token
 
 
-def extract_text_from_image(image_bytes: bytes) -> str:
-    """使用百度OCR从图片中提取文字"""
+def extract_text_from_image(image_bytes: bytes) -> tuple[str, list[dict]]:
+    """使用百度OCR从图片中提取文字，返回文本和带位置的结果"""
     # 预处理图片
     img = Image.open(BytesIO(image_bytes))
     if img.mode == 'RGBA':
@@ -67,9 +67,9 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     img.save(buffer, format='JPEG', quality=90)
     img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-    # 调用百度OCR API（通用文字识别-高精度版）
+    # 调用百度OCR API（通用文字识别-高精度含位置版）
     access_token = _get_access_token()
-    url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token={access_token}"
+    url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}"
 
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {"image": img_base64}
@@ -80,11 +80,102 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     if "error_code" in result:
         raise ValueError(f"OCR识别失败: {result.get('error_msg', 'Unknown error')}")
 
-    # 提取文字
+    # 提取文字和位置
     words_result = result.get("words_result", [])
     lines = [item["words"] for item in words_result]
 
-    return '\n'.join(lines)
+    return '\n'.join(lines), words_result
+
+
+def parse_question_with_location(words_result: list[dict]) -> Question:
+    """根据OCR位置信息解析题目"""
+    if not words_result:
+        return Question(stem="", options={}, raw_text="")
+
+    # 按Y坐标（top）排序
+    sorted_items = sorted(words_result, key=lambda x: x.get("location", {}).get("top", 0))
+
+    # 找出选项字母(A/B/C/D)的位置
+    option_letters = []
+    for item in sorted_items:
+        text = item.get("words", "").strip()
+        if re.match(r'^[A-D]$', text):
+            loc = item.get("location", {})
+            option_letters.append({
+                "letter": text,
+                "top": loc.get("top", 0),
+                "left": loc.get("left", 0)
+            })
+
+    # 如果没找到选项字母，回退到纯文本解析
+    if not option_letters:
+        raw_text = '\n'.join(item.get("words", "") for item in sorted_items)
+        return parse_question(raw_text)
+
+    # 第一个选项字母的Y坐标，作为题干和选项的分界线
+    first_option_top = min(opt["top"] for opt in option_letters)
+
+    # 提取题干（在第一个选项字母上方的内容）
+    stem_items = []
+    option_content_items = []
+
+    # 过滤掉无关内容
+    skip_patterns = [
+        r'^\d+/\d+$', r'^单选题$', r'^多选题$', r'^常识判断$',
+        r'^逻辑填空$', r'^言语理解$', r'^资料分析$', r'^判断推理$',
+        r'^数量关系$', r'^\d{1,2}:\d{2}', r'^5G', r'^\d+$',
+    ]
+
+    for item in sorted_items:
+        text = item.get("words", "").strip()
+        loc = item.get("location", {})
+        top = loc.get("top", 0)
+
+        # 跳过无关内容
+        if any(re.match(p, text) for p in skip_patterns):
+            continue
+        if len(text) <= 2 and not re.match(r'^[A-D]$', text):
+            continue
+
+        if top < first_option_top - 20:  # 在选项上方，是题干
+            stem_items.append(text)
+        else:
+            option_content_items.append(item)
+
+    stem = ''.join(stem_items)
+    stem = re.sub(r'[（\(]\s*[）\)]\s*。?$', '', stem)
+
+    # 根据位置匹配选项字母和内容
+    # 选项字母在左边，内容在右边，Y坐标相近
+    options = {}
+
+    for opt in option_letters:
+        letter = opt["letter"]
+        opt_top = opt["top"]
+        opt_left = opt["left"]
+
+        # 找到Y坐标相近且在字母右边的内容
+        matched_content = []
+        for item in option_content_items:
+            text = item.get("words", "").strip()
+            loc = item.get("location", {})
+            item_top = loc.get("top", 0)
+            item_left = loc.get("left", 0)
+
+            # 跳过选项字母本身
+            if re.match(r'^[A-D]$', text):
+                continue
+
+            # Y坐标相近（允许50像素误差）且在字母右边
+            if abs(item_top - opt_top) < 50 and item_left > opt_left:
+                matched_content.append((item_top, text))
+
+        # 按Y坐标排序后合并
+        matched_content.sort(key=lambda x: x[0])
+        options[letter] = ''.join(text for _, text in matched_content)
+
+    raw_text = '\n'.join(item.get("words", "") for item in sorted_items)
+    return Question(stem=stem.strip(), options=options, raw_text=raw_text)
 
 
 def parse_question(text: str) -> Question:
@@ -224,8 +315,8 @@ def extract_questions_from_images(image_bytes_list: list[bytes]) -> list[Questio
     """从多张图片中提取题目"""
     questions = []
     for image_bytes in image_bytes_list:
-        text = extract_text_from_image(image_bytes)
-        if text:
-            question = parse_question(text)
+        text, words_result = extract_text_from_image(image_bytes)
+        if words_result:
+            question = parse_question_with_location(words_result)
             questions.append(question)
     return questions

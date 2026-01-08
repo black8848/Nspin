@@ -123,8 +123,14 @@ async def ocr_debug(files: list[UploadFile] = File(...)):
         content = await file.read()
         validate_image(file.filename or "unknown", len(content))
         try:
-            text = extract_text_from_image(content)
-            results.append({"index": i + 1, "filename": file.filename, "text": text})
+            text, words_result = extract_text_from_image(content)
+            # 显示解析后的结果
+            from question_extractor import parse_question_with_location
+            question = parse_question_with_location(words_result)
+            parsed = f"\n\n--- 解析结果 ---\n题干: {question.stem}\n"
+            for k, v in sorted(question.options.items()):
+                parsed += f"{k}: {v}\n"
+            results.append({"index": i + 1, "filename": file.filename, "text": text + parsed})
         except Exception as e:
             results.append({"index": i + 1, "filename": file.filename, "error": str(e)})
 
