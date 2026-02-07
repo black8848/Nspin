@@ -1,8 +1,9 @@
 """图片智能拼接模块 - 将多张图片拼接成A4尺寸"""
 
 from dataclasses import dataclass
-from PIL import Image
 from io import BytesIO
+
+from PIL import Image
 
 # A4 尺寸 (300 DPI) - 横向
 A4_WIDTH = 3508
@@ -12,16 +13,27 @@ GAP = 20  # 图片间距
 COLUMNS = 4  # 每行4列，每页只放1行
 
 # 手机截图裁切比例
-CROP_TOP_PERCENT = 5  # 裁切顶部7%（状态栏）
+CROP_TOP_PERCENT = 5  # 裁切顶部5%（状态栏）
 CROP_BOTTOM_PERCENT = 3  # 裁切底部3%（底部横条）
 
 
+def _close_images(images: list[Image.Image]) -> None:
+    """关闭图片列表中的所有图片"""
+    for img in images:
+        try:
+            img.close()
+        except Exception:
+            pass
+
+
 def crop_phone_screenshot(img: Image.Image) -> Image.Image:
-    """裁切手机截图的状态栏和底部横条"""
+    """裁切手机截图的状态栏和底部横条，关闭原图"""
     width, height = img.size
     top = int(height * CROP_TOP_PERCENT / 100)
     bottom = int(height * (100 - CROP_BOTTOM_PERCENT) / 100)
-    return img.crop((0, top, width, bottom))
+    cropped = img.crop((0, top, width, bottom))
+    img.close()
+    return cropped
 
 
 @dataclass
@@ -89,25 +101,54 @@ class ImageStitcher:
         return pages
 
     def _fit_to_width(self, img: Image.Image, target_width: int) -> Image.Image:
-        """缩放图片以适应目标宽度"""
+        """缩放图片以适应目标宽度，关闭原图"""
         if img.width == target_width:
             return img
         ratio = target_width / img.width
         new_height = int(img.height * ratio)
-        return img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        resized = img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        img.close()
+        return resized
 
     def _render_page(self, placed_images: list[PlacedImage]) -> Image.Image:
         """渲染单个A4页面"""
         page = Image.new('RGB', (self.a4_width, self.a4_height), 'white')
 
         for placed in placed_images:
-            # 确保图片是RGB模式
             img = placed.image
             if img.mode != 'RGB':
-                img = img.convert('RGB')
-            page.paste(img, (placed.x, placed.y))
+                converted = img.convert('RGB')
+                page.paste(converted, (placed.x, placed.y))
+                converted.close()
+            else:
+                page.paste(img, (placed.x, placed.y))
+            img.close()
 
         return page
+
+
+def _load_and_preprocess(image_bytes_list: list[bytes], crop: bool) -> list[Image.Image]:
+    """加载并预处理图片，调用方负责关闭返回的图片"""
+    images = []
+    try:
+        for data in image_bytes_list:
+            img = Image.open(BytesIO(data))
+
+            if img.mode == 'RGBA':
+                background = Image.new('RGB', img.size, 'white')
+                background.paste(img, mask=img.split()[3])
+                img.close()
+                img = background
+
+            if crop:
+                img = crop_phone_screenshot(img)
+
+            images.append(img)
+
+        return images
+    except Exception:
+        _close_images(images)
+        raise
 
 
 def stitch_images_to_a4(image_bytes_list: list[bytes], crop: bool = True) -> list[bytes]:
@@ -121,29 +162,22 @@ def stitch_images_to_a4(image_bytes_list: list[bytes], crop: bool = True) -> lis
     Returns:
         A4页面的PNG字节数据列表
     """
-    images = []
-    for data in image_bytes_list:
-        img = Image.open(BytesIO(data))
-        if img.mode == 'RGBA':
-            # 处理透明背景
-            background = Image.new('RGB', img.size, 'white')
-            background.paste(img, mask=img.split()[3])
-            img = background
-        # 裁切手机截图
-        if crop:
-            img = crop_phone_screenshot(img)
-        images.append(img)
+    images = _load_and_preprocess(image_bytes_list, crop)
+    pages = []
 
-    stitcher = ImageStitcher()
-    pages = stitcher.stitch(images)
+    try:
+        stitcher = ImageStitcher()
+        pages = stitcher.stitch(images)
 
-    result = []
-    for page in pages:
-        buffer = BytesIO()
-        page.save(buffer, format='PNG', dpi=(300, 300))
-        result.append(buffer.getvalue())
+        result = []
+        for page in pages:
+            buffer = BytesIO()
+            page.save(buffer, format='PNG', dpi=(300, 300))
+            result.append(buffer.getvalue())
 
-    return result
+        return result
+    finally:
+        _close_images(pages)
 
 
 def stitch_images_to_pdf(image_bytes_list: list[bytes], crop: bool = True) -> bytes:
@@ -157,30 +191,24 @@ def stitch_images_to_pdf(image_bytes_list: list[bytes], crop: bool = True) -> by
     Returns:
         PDF文件字节数据
     """
-    images = []
-    for data in image_bytes_list:
-        img = Image.open(BytesIO(data))
-        if img.mode == 'RGBA':
-            background = Image.new('RGB', img.size, 'white')
-            background.paste(img, mask=img.split()[3])
-            img = background
-        # 裁切手机截图
-        if crop:
-            img = crop_phone_screenshot(img)
-        images.append(img)
+    images = _load_and_preprocess(image_bytes_list, crop)
+    pages = []
 
-    stitcher = ImageStitcher()
-    pages = stitcher.stitch(images)
+    try:
+        stitcher = ImageStitcher()
+        pages = stitcher.stitch(images)
 
-    if not pages:
-        raise ValueError("没有生成任何页面")
+        if not pages:
+            raise ValueError("没有生成任何页面")
 
-    buffer = BytesIO()
-    pages[0].save(
-        buffer,
-        format='PDF',
-        save_all=True,
-        append_images=pages[1:] if len(pages) > 1 else [],
-        resolution=300
-    )
-    return buffer.getvalue()
+        buffer = BytesIO()
+        pages[0].save(
+            buffer,
+            format='PDF',
+            save_all=True,
+            append_images=pages[1:] if len(pages) > 1 else [],
+            resolution=300
+        )
+        return buffer.getvalue()
+    finally:
+        _close_images(pages)
